@@ -4,10 +4,14 @@ const TelegramBot = require("node-telegram-bot-api");
 const app = express();
 app.use(express.json());
 
-const token = process.env.TELEGRAM_TOKEN;
+const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token);
 
-app.post("/", (req, res) => {
+app.get("/", (req, res) => {
+  res.send("PowerInside bot is running");
+});
+
+app.post("/webhook", (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
