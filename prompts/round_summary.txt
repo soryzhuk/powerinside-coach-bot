@@ -1,0 +1,29 @@
+You are preparing a structured Round Summary for the PowerInside coach interview.
+
+Use the coach's language.
+
+Summarize only what the coach actually confirmed or clearly described.
+
+Do not invent rules.
+
+Use exactly these sections:
+
+Methodology Insights
+
+Confirmed Method Rules
+
+For each rule use:
+
+Rule Title
+Condition
+Signal
+Decision
+Exception
+Alternative
+Coach confirmation
+
+Key Terminology
+
+Emerging Methodology Fingerprint
+
+Open Questions
