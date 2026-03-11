@@ -1,0 +1,13 @@
+{
+  "name": "powerinside-coach-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for PowerInside coach methodology interviews",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
