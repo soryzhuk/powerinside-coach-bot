@@ -2,16 +2,23 @@ const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
 const path = require("path");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(express.json());
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-if (!token) {
+const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
+if (!telegramToken) {
   console.error("TELEGRAM_BOT_TOKEN is missing");
 }
+if (!openaiApiKey) {
+  console.error("OPENAI_API_KEY is missing");
+}
 
-const bot = new TelegramBot(token);
+const bot = new TelegramBot(telegramToken);
+const openai = new OpenAI({ apiKey: openaiApiKey });
 
 const PROMPT_PATH = path.join(__dirname, "prompts", "coach_interview.txt");
 const SUMMARY_PROMPT_PATH = path.join(__dirname, "prompts", "round_summary.txt");
@@ -28,10 +35,10 @@ function readPrompt(filePath) {
 const coachInterviewPrompt = readPrompt(PROMPT_PATH);
 const roundSummaryPrompt = readPrompt(SUMMARY_PROMPT_PATH);
 
-// Simple in-memory session storage for MVP
 const sessions = new Map();
 
 const rounds = [
+  "PRE-INTERVIEW",
   "ROUND 1 — TARGET ATHLETE",
   "ROUND 2 — LOAD MANAGEMENT",
   "ROUND 3 — AUTOREGULATION",
@@ -44,13 +51,53 @@ const rounds = [
 function getSession(chatId) {
   if (!sessions.has(chatId)) {
     sessions.set(chatId, {
-      started: false,
+      interviewStarted: false,
       currentRound: 0,
-      answers: [],
-      interviewStarted: false
+      history: []
     });
   }
   return sessions.get(chatId);
+}
+
+function trimHistory(history, maxItems = 20) {
+  return history.slice(-maxItems);
+}
+
+async function askModel(session, userMessage) {
+  const historyText = trimHistory(session.history)
+    .map((item) => `${item.role.toUpperCase()}: ${item.text}`)
+    .join("\n\n");
+
+  const systemPrompt = `${coachInterviewPrompt}
+
+CURRENT ROUND:
+${rounds[session.currentRound] || "UNKNOWN"}
+
+IMPORTANT:
+- Speak in the coach's language.
+- Ask only one question per message.
+- Stay strictly within the current round.
+- If the current round has enough information, produce a Round Summary and pause.
+- Do not start the next round automatically.
+`;
+
+  const userPrompt = `Conversation so far:
+
+${historyText}
+
+Latest coach message:
+${userMessage}`;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ]
+  });
+
+  return response.choices[0].message.content.trim();
 }
 
 app.get("/", (req, res) => {
@@ -70,12 +117,11 @@ app.post("/webhook", async (req, res) => {
 bot.onText(/\/start/, async (msg) => {
   try {
     const chatId = msg.chat.id;
-    const session = getSession(chatId);
-
-    session.started = true;
-    session.interviewStarted = false;
-    session.currentRound = 0;
-    session.answers = [];
+    sessions.set(chatId, {
+      interviewStarted: false,
+      currentRound: 0,
+      history: []
+    });
 
     await bot.sendMessage(
       chatId,
@@ -93,12 +139,18 @@ bot.onText(/\/interview/, async (msg) => {
 
     session.interviewStarted = true;
     session.currentRound = 0;
-    session.answers = [];
+    session.history = [];
 
-    await bot.sendMessage(
-      chatId,
-      "Починаємо інтерв’ю.\n\nЦе не тест і не екзамен. Мені важливо зрозуміти, як ви реально працюєте з атлетами на практиці.\n\nСпершу коротке warm-up питання.\n\nЯк ви прийшли у тренерську діяльність?"
-    );
+    const openingMessage =
+      "Вітаю. Це інтерв’ю є частиною проєкту PowerInside.\n\n" +
+      "Це не тест і не екзамен. Мені важливо зрозуміти, як ви реально працюєте з атлетами на практиці.\n\n" +
+      "Будемо рухатися крок за кроком, по одному питанню.\n\n" +
+      "Почнемо з короткого warm-up питання.\n\n" +
+      "Як ви прийшли у тренерську діяльність?";
+
+    session.history.push({ role: "assistant", text: openingMessage });
+
+    await bot.sendMessage(chatId, openingMessage);
   } catch (error) {
     console.error("Send /interview error:", error);
   }
@@ -109,15 +161,31 @@ bot.onText(/\/round/, async (msg) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
 
-    if (!session.interviewStarted) {
-      await bot.sendMessage(chatId, "Спершу натисніть /interview");
-      return;
-    }
-
-    const roundTitle = rounds[session.currentRound] || "Інтерв’ю завершено";
-    await bot.sendMessage(chatId, `Поточний раунд:\n\n${roundTitle}`);
+    await bot.sendMessage(
+      chatId,
+      `Поточний раунд:\n${rounds[session.currentRound] || "UNKNOWN"}`
+    );
   } catch (error) {
     console.error("Send /round error:", error);
+  }
+});
+
+bot.onText(/\/next/, async (msg) => {
+  try {
+    const chatId = msg.chat.id;
+    const session = getSession(chatId);
+
+    if (session.currentRound < 7) {
+      session.currentRound += 1;
+      await bot.sendMessage(
+        chatId,
+        `Переходимо далі.\n\nПоточний раунд:\n${rounds[session.currentRound]}`
+      );
+    } else {
+      await bot.sendMessage(chatId, "Усі 7 раундів уже завершено.");
+    }
+  } catch (error) {
+    console.error("Send /next error:", error);
   }
 });
 
@@ -126,25 +194,27 @@ bot.onText(/\/summary/, async (msg) => {
     const chatId = msg.chat.id;
     const session = getSession(chatId);
 
-    if (!session.answers.length) {
-      await bot.sendMessage(chatId, "Поки що немає даних для резюме.");
-      return;
-    }
-
-    const lastRoundAnswers = session.answers
-      .filter((item) => item.round === session.currentRound)
-      .map((item) => `Q: ${item.question}\nA: ${item.answer}`)
+    const historyText = trimHistory(session.history, 30)
+      .map((item) => `${item.role.toUpperCase()}: ${item.text}`)
       .join("\n\n");
 
-    const summaryText =
-      `ROUND SUMMARY\n\n` +
-      `Round: ${rounds[session.currentRound] || "Unknown"}\n\n` +
-      `Prompt template loaded: ${roundSummaryPrompt ? "yes" : "no"}\n\n` +
-      `${lastRoundAnswers || "Немає відповідей у цьому раунді."}`;
+    const response = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: roundSummaryPrompt },
+        {
+          role: "user",
+          content: `Current round: ${rounds[session.currentRound]}\n\nConversation:\n\n${historyText}`
+        }
+      ]
+    });
 
-    await bot.sendMessage(chatId, summaryText.slice(0, 4000));
+    const summary = response.choices[0].message.content.trim();
+    await bot.sendMessage(chatId, summary.slice(0, 4000));
   } catch (error) {
     console.error("Send /summary error:", error);
+    await bot.sendMessage(msg.chat.id, "Не вдалося сформувати резюме раунду.");
   }
 });
 
@@ -163,58 +233,19 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    const currentRoundTitle = rounds[session.currentRound] || "ROUND 1 — TARGET ATHLETE";
+    session.history.push({ role: "user", text });
 
-    let nextQuestion = "";
+    const reply = await askModel(session, text);
 
-    if (session.currentRound === 0) {
-      if (session.answers.filter((a) => a.round === 0).length === 0) {
-        session.answers.push({
-          round: 0,
-          question: "Як ви прийшли у тренерську діяльність?",
-          answer: text
-        });
+    session.history.push({ role: "assistant", text: reply });
 
-        nextQuestion =
-          "Дякую.\n\nЧи працюєте ви за конкретною системою / framework, чи здебільшого адаптуєте тренування під атлета і ситуацію?";
-      } else if (session.answers.filter((a) => a.round === 0).length === 1) {
-        session.answers.push({
-          round: 0,
-          question: "Чи працюєте ви за конкретною системою / framework, чи здебільшого адаптуєте тренування під атлета і ситуацію?",
-          answer: text
-        });
-
-        nextQuestion =
-          "Ще одне важливе питання перед основним раундом.\n\nЯкби інший досвідчений тренер подивився на одне ваше тренування, що одразу показало б, що це саме ваша система, а не чиясь інша?";
-      } else if (session.answers.filter((a) => a.round === 0).length === 2) {
-        session.answers.push({
-          round: 0,
-          question: "Що робить ваш підхід впізнаваним?",
-          answer: text
-        });
-
-        nextQuestion =
-          "ROUND 1 — TARGET ATHLETE\n\nЩоб правильно зрозуміти вашу систему, мені важливо спочатку визначити, для якого типу атлета вона побудована.\n\nДля яких атлетів ваша система підходить найкраще?";
-        session.currentRound = 1;
-      }
-    } else {
-      session.answers.push({
-        round: session.currentRound,
-        question: currentRoundTitle,
-        answer: text
-      });
-
-      nextQuestion =
-        `Відповідь збережена.\n\nПоточний раунд:\n${currentRoundTitle}\n\n` +
-        `Промпт завантажено: ${coachInterviewPrompt ? "так" : "ні"}\n\n` +
-        `Щоб рухатись далі професійно, наступним кроком ми додамо OpenAI API і повну логіку раундів.`;
-    }
-
-    if (nextQuestion) {
-      await bot.sendMessage(chatId, nextQuestion.slice(0, 4000));
-    }
+    await bot.sendMessage(chatId, reply.slice(0, 4000));
   } catch (error) {
     console.error("Message handler error:", error);
+    await bot.sendMessage(
+      msg.chat.id,
+      "Сталася помилка під час обробки повідомлення. Спробуйте ще раз."
+    );
   }
 });
 
